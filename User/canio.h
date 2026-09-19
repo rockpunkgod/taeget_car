@@ -1,5 +1,5 @@
-#ifndef CANIO_H /* 头文件保护：首次包含时，CANIO_H 尚未定义。 */
-#define CANIO_H /* 定义标记，防止同一编译单元重复定义类型。 */
+#ifndef CANIO_H
+#define CANIO_H
 
 #include "stm32f4xx_hal.h" /* 提供 CAN_HandleTypeDef；硬件操作只放在 canio.c。 */
 #include "cmsis_os2.h"     /* 提供 CMSIS-RTOS V2 的任务类型和 Thread Flags。 */
@@ -11,7 +11,7 @@
 #define CANIO_MAX_ROUTES    8U /* 最多注册 8 条路由；U 表示无符号整数常量。 */
 #define CANIO_RX_FLAG (1U << 0) /* 左移 0 位，选用任务标志的第 0 位。 */
 
-/* typedef 为类型命名；struct 把多个成员组成一个整体；末尾必须有分号。 */
+
 typedef struct
 {
     uint32_t id;           /* 标准 CAN ID，合法范围 0..0x7FF。 */
