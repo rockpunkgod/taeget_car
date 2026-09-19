@@ -41,7 +41,8 @@ add_executable(${CMAKE_PROJECT_NAME}
         User/pid.h
         User/canio_stm32.c
         User/GM6020.c
-        User/GM6020.h)
+        User/GM6020.h
+        User/remoteio.cpp)
 
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/stm32cubemx)
