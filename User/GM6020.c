@@ -109,7 +109,8 @@ void GM6020_SetTargetAngle(GM6020_t *gm6020, float target_angle_deg)
     }
 }
 
-void GM6020_ParseFeedback(GM6020_t *gm6020, const CanMsg_t *msg)
+void GM6020_ParseFeedback(GM6020_t *gm6020,
+                          const CANIO_Frame_t *msg)
 {
     uint16_t encoder;
     int16_t speed_rpm;
@@ -119,13 +120,10 @@ void GM6020_ParseFeedback(GM6020_t *gm6020, const CanMsg_t *msg)
     if ((gm6020 == NULL) || (msg == NULL)) {
         return;
     }
-    if ((msg->is_ext != 0U)
-        || (msg->is_remote != 0U)
-        || (msg->dlc != 8U)
-        || (msg->id != GM6020_FEEDBACK_STD_ID)) {
+    if ((msg->dlc != 8U)
+    || (msg->id != GM6020_FEEDBACK_STD_ID)) {
         return;
     }
-
     encoder = (uint16_t)(((uint16_t)msg->data[0] << 8U) | msg->data[1]);
     speed_rpm = (int16_t)(((uint16_t)msg->data[2] << 8U) | msg->data[3]);
     feedback_current = (int16_t)(((uint16_t)msg->data[4] << 8U) | msg->data[5]);
@@ -271,24 +269,43 @@ void GM6020_GetTelemetry(const GM6020_t *gm6020,
              <= GM6020_FEEDBACK_TIMEOUT_MS)) ? 1U : 0U;
 }
 
-HAL_StatusTypeDef GM6020_SendMotor2Control(int16_t control_output)
+HAL_StatusTypeDef GM6020_SendMotor2Control(
+    CANIO_Bus_t *bus,
+    int16_t control_output)
 {
-    CanMsg_t msg = {0};
+    uint8_t data[8] = {0};
     uint16_t raw_output;
 
-    if (control_output > (int16_t)GM6020_CONTROL_OUTPUT_LIMIT) {
+    if (bus == NULL)
+    {
+        return HAL_ERROR;
+    }
+
+    if (control_output > (int16_t)GM6020_CONTROL_OUTPUT_LIMIT)
+    {
         control_output = (int16_t)GM6020_CONTROL_OUTPUT_LIMIT;
-    } else if (control_output < (int16_t)-GM6020_CONTROL_OUTPUT_LIMIT) {
+    }
+    else if (control_output < (int16_t)-GM6020_CONTROL_OUTPUT_LIMIT)
+    {
         control_output = (int16_t)-GM6020_CONTROL_OUTPUT_LIMIT;
     }
+
     raw_output = (uint16_t)control_output;
 
-    msg.id = GM6020_CONTROL_STD_ID;
-    msg.dlc = 8U;
-    msg.is_ext = 0U;
-    msg.is_remote = 0U;
-    msg.data[2] = (uint8_t)(raw_output >> 8U);
-    msg.data[3] = (uint8_t)(raw_output & 0xFFU);
+    /*
+     * 这里保留你原来的 Motor2 数据位置：
+     * data[2], data[3]
+     */
+    data[2] = (uint8_t)(raw_output >> 8U);
+    data[3] = (uint8_t)(raw_output & 0xFFU);
 
-    return canio_send(&msg);
+    if (CANIO_Send(
+            bus,
+            GM6020_CONTROL_STD_ID,
+            data))
+    {
+        return HAL_OK;
+    }
+
+    return HAL_ERROR;
 }

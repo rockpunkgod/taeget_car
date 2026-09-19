@@ -23,6 +23,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
+#include "remoteio.hpp"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -117,7 +119,11 @@ int main(void)
   MX_USART3_UART_Init();
   MX_USART6_UART_Init();
   /* USER CODE BEGIN 2 */
-
+  REMOTEIO_Init(
+      sbus_rx_buf[0],
+      sbus_rx_buf[1],
+      SBUS_RX_BUF_NUM
+      );
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -439,11 +445,14 @@ static void MX_GPIO_Init(void)
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN 5 */
-  /* Infinite loop */
+
   for(;;)
   {
+    REMOTEIO_UpdateStatus();
+
     osDelay(1);
   }
+
   /* USER CODE END 5 */
 }
 

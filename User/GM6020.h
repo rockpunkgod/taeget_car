@@ -68,7 +68,8 @@ typedef struct {
 extern GM6020_t motor[3];
 
 void GM6020_Init(GM6020_t *gm6020, uint8_t motor_id);
-void GM6020_ParseFeedback(GM6020_t *gm6020, const CanMsg_t *msg);
+void GM6020_ParseFeedback(GM6020_t *gm6020,
+                          const CANIO_Frame_t *msg);
 void GM6020_SetMode(GM6020_t *gm6020, GM6020_ControlMode_t mode);
 void GM6020_SetTargetSpeed(GM6020_t *gm6020, float target_speed_rpm);
 void GM6020_SetTargetAngle(GM6020_t *gm6020, float target_angle_deg);
@@ -76,6 +77,9 @@ int16_t GM6020_CalculateControl(GM6020_t *gm6020, uint32_t now_ms);
 void GM6020_GetTelemetry(const GM6020_t *gm6020,
                          uint32_t now_ms,
                          GM6020_Telemetry_t *telemetry);
-HAL_StatusTypeDef GM6020_SendMotor2Control(int16_t control_output);
+HAL_StatusTypeDef GM6020_SendMotor2Control(
+    CANIO_Bus_t *bus,
+    int16_t control_output
+);
 
 #endif /* CAN_DEMO_GM6020_H */
