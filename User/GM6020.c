@@ -296,8 +296,8 @@ HAL_StatusTypeDef GM6020_SendMotor2Control(
      * 这里保留你原来的 Motor2 数据位置：
      * data[2], data[3]
      */
-    data[2] = (uint8_t)(raw_output >> 8U);
-    data[3] = (uint8_t)(raw_output & 0xFFU);
+    data[0] = (uint8_t)(raw_output >> 8U);
+    data[1] = (uint8_t)(raw_output & 0xFFU);
 
     if (CANIO_Send(
             bus,

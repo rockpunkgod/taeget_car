@@ -8,7 +8,7 @@
 
 #define GM6020_ENCODER_RESOLUTION       8192
 #define GM6020_ENCODER_HALF_RANGE       (GM6020_ENCODER_RESOLUTION / 2)
-#define GM6020_FEEDBACK_STD_ID          0x206U
+#define GM6020_FEEDBACK_STD_ID          0x205U
 #define GM6020_CONTROL_STD_ID           0x1FE
 #define GM6020_FEEDBACK_TIMEOUT_MS      100U
 #define GM6020_TARGET_ANGLE_DEG         90.0f
@@ -77,7 +77,7 @@ int16_t GM6020_CalculateControl(GM6020_t *gm6020, uint32_t now_ms);
 void GM6020_GetTelemetry(const GM6020_t *gm6020,
                          uint32_t now_ms,
                          GM6020_Telemetry_t *telemetry);
-HAL_StatusTypeDef GM6020_SendMotor2Control(
+HAL_StatusTypeDef GM6020_SendMotor1Control(
     CANIO_Bus_t *bus,
     int16_t control_output
 );
