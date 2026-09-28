@@ -76,7 +76,20 @@ typedef struct
 #pragma pack(pop)  // 恢复之前的对齐方式
 
 extern RC_ctrl_t rc_ctrl;
+/* 遥控器接收诊断信息：只用于观察，不参与电机控制 */
+typedef struct
+{
+    uint32_t irq_count;          // 进入遥控器中断处理函数的次数
+    uint32_t idle_count;         // 进入 IDLE 空闲中断分支的次数
+    uint32_t decoded_count;      // 完成通道解码的次数
+    uint32_t bad_header_count;   // 25字节候选帧中，帧头错误的次数
 
+    uint16_t last_rx_len;        // 最近一次计算出的接收长度
+    uint8_t  last_head;          // 最近一次接收数据的第一个字节
+    uint8_t  last_tail;          // 长度为25时，记录第25个字节
+} RemoteIO_Debug_t;
+
+extern volatile RemoteIO_Debug_t remote_debug;
 #ifdef __cplusplus
 class remoteio {
 

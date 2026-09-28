@@ -18,13 +18,13 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "cmsis_os.h"
 
-/* Private includes ----------------------------------------------------------*/
-/* USER CODE BEGIN Includes */
 
 #include "remoteio.hpp"
-
+#include "canio.h"
+#include "LK9025.h"
+#include "GM6020.h"
+#include "vofa_remote.hpp"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -34,6 +34,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define MF9025_ALL_ID_TEST 0 /* Single connected motor only; 0 restores normal control. */
 
 /* USER CODE END PD */
 
@@ -60,7 +61,29 @@ const osThreadAttr_t defaultTask_attributes = {
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* USER CODE BEGIN PV */
+static CANIO_Bus_t can1_bus;
 
+/* Diagnostic swap: object/telemetry names are retained for comparison.
+ * mf9025_id1 / mf1_* now address physical ID 5 (0x145), sent first.
+ * mf9025_id5 / mf5_* now address physical ID 1 (0x141), sent second.
+ * This does not change IDs stored in the motors. */
+static LK9025_t mf9025_id1;
+static LK9025_t mf9025_id5;
+
+/* 使用 GM6020.c 已经定义的 motor[3]，motor[0] 代表 ID 6 */
+
+static LK9025_Telemetry_t mf1_telemetry;
+static LK9025_Telemetry_t mf5_telemetry;
+static GM6020_Telemetry_t gm6_telemetry;
+
+static volatile HAL_StatusTypeDef mf1_tx_status;
+static volatile HAL_StatusTypeDef mf5_tx_status;
+static volatile HAL_StatusTypeDef gm6_tx_status;
+static volatile int16_t gm6_control_output;
+static volatile uint8_t mf_test_last_id;
+static volatile uint8_t mf_test_last_command;
+static volatile float mf_test_speed_rpm;
+static volatile HAL_StatusTypeDef mf_test_tx_status;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -72,10 +95,15 @@ static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_USART6_UART_Init(void);
+static void CAN1_Start(void);
+static void Update9025FromRemote(void);
 void StartDefaultTask(void *argument);
 
 /* USER CODE BEGIN PFP */
-
+static void GM6020_RxRoute(
+    const CANIO_Frame_t *frame,
+    void *user_data
+);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -124,6 +152,8 @@ int main(void)
       sbus_rx_buf[1],
       SBUS_RX_BUF_NUM
       );
+
+  CAN1_Start();
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -255,6 +285,138 @@ static void MX_CAN1_Init(void)
 
 }
 
+static void CAN1_Start(void)
+{
+  CAN_FilterTypeDef filter = {0};
+
+  filter.FilterBank = 0U;
+  filter.FilterMode = CAN_FILTERMODE_IDMASK;
+  filter.FilterScale = CAN_FILTERSCALE_32BIT;
+  filter.FilterIdHigh = 0U;
+  filter.FilterIdLow = 0U;
+  filter.FilterMaskIdHigh = 0U;
+  filter.FilterMaskIdLow = 0U;
+  filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;
+  filter.FilterActivation = ENABLE;
+  filter.SlaveStartFilterBank = 14U;
+
+  if (HAL_CAN_ConfigFilter(&hcan1, &filter) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  CANIO_Init(&can1_bus, &hcan1);
+
+  if (!LK9025_Init(&mf9025_id1, &can1_bus, 5U) ||
+      !LK9025_Init(&mf9025_id5, &can1_bus, 1U))
+  {
+    Error_Handler();
+  }
+
+  GM6020_Init(&motor[0], 6U);
+  if (!CANIO_Register(&can1_bus,
+                     GM6020_FEEDBACK_BASE_ID + 6U,
+                     GM6020_RxRoute,
+                     &motor[0]))
+  {
+    Error_Handler();
+  }
+
+  if (HAL_CAN_Start(&hcan1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  if (HAL_CAN_ActivateNotification(
+          &hcan1,
+          CAN_IT_RX_FIFO0_MSG_PENDING) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+static void Update9025FromRemote(void)
+{
+  uint32_t primask = __get_PRIMASK();
+  int16_t speed_input;
+  int16_t mode_input;
+  uint8_t remote_offline;
+  float target_speed_rpm;
+
+  __disable_irq();
+  speed_input = rc_ctrl.rc.ch[3];
+  mode_input = rc_ctrl.rc.ch[4];
+  remote_offline = (uint8_t)(
+      (rc_ctrl.sbus_status.rc_offline != 0U) ||
+      (rc_ctrl.sbus_status.failsafe != 0U) ||
+      (rc_ctrl.sbus_status.frame_lost != 0U));
+  __DMB();
+  if (primask == 0U)
+  {
+    __enable_irq();
+  }
+
+  /* I4: 352 = protect, 1695 = speed. Allow +/-30 raw counts
+   * around the speed detent; all other values select protection. */
+  if ((remote_offline != 0U) || (mode_input < 1665) || (mode_input > 1725))
+  {
+    LK9025_SetTargetSpeed(&mf9025_id1, 0.0f);
+    LK9025_SetTargetSpeed(&mf9025_id5, 0.0f);
+    LK9025_SetMode(&mf9025_id1, LK9025_MODE_PROTECT);
+    LK9025_SetMode(&mf9025_id5, LK9025_MODE_PROTECT);
+    return;
+  }
+
+  /* RC channel 3 is the left vertical stick, about -800..800. */
+  target_speed_rpm = (float)speed_input * 0.1f;
+  LK9025_SetTargetSpeed(&mf9025_id1, target_speed_rpm);
+  LK9025_SetTargetSpeed(&mf9025_id5, target_speed_rpm);
+  LK9025_SetMode(&mf9025_id1, LK9025_MODE_SPEED);
+  LK9025_SetMode(&mf9025_id5, LK9025_MODE_SPEED);
+}
+
+/* One frame per control tick. Retry a busy mailbox without skipping an ID. */
+static void MF9025_TestAllIds(void)
+{
+  static uint8_t next_id = LK9025_MIN_MOTOR_ID;
+  static uint8_t was_enabled;
+  static uint8_t run_sweep;
+  uint8_t data[8] = {0};
+  uint8_t enabled = (mf9025_id1.command_mode == LK9025_MODE_SPEED);
+  float speed = mf9025_id1.command_speed_rpm;
+
+  if (enabled != was_enabled) {
+    next_id = LK9025_MIN_MOTOR_ID;
+    run_sweep = enabled;
+    was_enabled = enabled;
+  }
+  if (speed > 10.0f) { speed = 10.0f; }
+  if (speed < -10.0f) { speed = -10.0f; }
+  mf_test_speed_rpm = enabled ? speed : 0.0f;
+
+  if (!enabled) {
+    data[0] = LK9025_CMD_STOP;
+  } else if (run_sweep) {
+    data[0] = LK9025_CMD_RUN;
+  } else {
+    uint32_t raw = (uint32_t)(int32_t)(speed * 600.0f);
+    data[0] = LK9025_CMD_SPEED;
+    for (uint8_t i = 0U; i < 4U; ++i) {
+      data[4U + i] = (uint8_t)(raw >> (8U * i));
+    }
+  }
+  mf_test_last_id = next_id;
+  mf_test_last_command = data[0];
+  mf_test_tx_status = CANIO_Send(&can1_bus,
+      LK9025_CAN_BASE_ID + next_id, data) ? HAL_OK : HAL_ERROR;
+  if (mf_test_tx_status == HAL_OK) {
+    if (++next_id > LK9025_MAX_MOTOR_ID) {
+      next_id = LK9025_MIN_MOTOR_ID;
+      run_sweep = 0U;
+    }
+  }
+}
+
 /**
   * @brief USART1 Initialization Function
   * @param None
@@ -271,10 +433,10 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 100000;
-  huart1.Init.WordLength = UART_WORDLENGTH_9B;
+  huart1.Init.BaudRate = 115200;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
-  huart1.Init.Parity = UART_PARITY_EVEN;
+  huart1.Init.Parity = UART_PARITY_NONE;
   huart1.Init.Mode = UART_MODE_TX_RX;
   huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   huart1.Init.OverSampling = UART_OVERSAMPLING_16;
@@ -338,12 +500,10 @@ static void MX_USART3_UART_Init(void)
   /* USER CODE END USART3_Init 1 */
   huart3.Instance = USART3;
   huart3.Init.BaudRate = 100000;
-  huart3.Init.WordLength = UART_WORDLENGTH_8B;
-  huart3.Init.StopBits = UART_STOPBITS_1;
-  huart3.Init.Parity = UART_PARITY_NONE;
-  huart3.Init.Mode = UART_MODE_TX_RX;
-  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart3.Init.WordLength = UART_WORDLENGTH_9B;
+  huart3.Init.StopBits = UART_STOPBITS_2;
+  huart3.Init.Parity = UART_PARITY_EVEN;
+  huart3.Init.Mode = UART_MODE_RX;
   if (HAL_UART_Init(&huart3) != HAL_OK)
   {
     Error_Handler();
@@ -432,7 +592,25 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+static void GM6020_RxRoute(
+    const CANIO_Frame_t *frame,
+    void *user_data)
+{
+  GM6020_t *gm6020 = (GM6020_t *)user_data;
 
+  if ((frame == NULL) || (gm6020 == NULL)) {
+    return;
+  }
+
+  GM6020_ParseFeedback(gm6020, frame);
+}
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
+{
+  if ((hcan != NULL) && (hcan->Instance == CAN1))
+  {
+    CANIO_RxIRQ(&can1_bus);
+  }
+}
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -444,11 +622,43 @@ static void MX_GPIO_Init(void)
 /* USER CODE END Header_StartDefaultTask */
 void StartDefaultTask(void *argument)
 {
+  uint32_t last_vofa_tick = 0U;
+  uint32_t last_control_tick = 0U;
+
   /* USER CODE BEGIN 5 */
 
   for(;;)
   {
     REMOTEIO_UpdateStatus();
+    CANIO_ProcessRx(&can1_bus);
+    /* RX timestamps must not be newer than the control snapshot. */
+    uint32_t now = HAL_GetTick();
+
+    if ((uint32_t)(now - last_control_tick) >= 2U)
+    {
+      last_control_tick = now;
+      Update9025FromRemote();
+      if (MF9025_ALL_ID_TEST != 0U) {
+        MF9025_TestAllIds();
+      } else {
+      mf1_tx_status = LK9025_UpdateControl(&mf9025_id1, now);
+      mf5_tx_status = LK9025_UpdateControl(&mf9025_id5, now);
+      gm6_control_output = GM6020_CalculateControl(&motor[0], now);
+      gm6_tx_status = GM6020_SendControl(
+          &can1_bus,
+          6U,
+          gm6_control_output);
+      }
+    }
+
+    if ((uint32_t)(now - last_vofa_tick) >= 20U)
+    {
+      last_vofa_tick = now;
+      LK9025_GetTelemetry(&mf9025_id1, now, &mf1_telemetry);
+      LK9025_GetTelemetry(&mf9025_id5, now, &mf5_telemetry);
+      GM6020_GetTelemetry(&motor[0], now, &gm6_telemetry);
+      (void)VOFA_Remote_Send();
+    }
 
     osDelay(1);
   }

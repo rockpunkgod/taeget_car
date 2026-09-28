@@ -35,14 +35,16 @@ enable_language(C ASM)
 add_executable(${CMAKE_PROJECT_NAME}
         User/canio.h
         User/canio.c
-        User/lk9025.c
-        User/lk9025.h
+        User/LK9025.c
+        User/LK9025.h
         User/pid.c
         User/pid.h
         User/canio_stm32.c
         User/GM6020.c
         User/GM6020.h
-        User/remoteio.cpp)
+        User/remoteio.cpp
+        User/vofa_remote.cpp
+        User/vofa_remote.hpp)
 
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/stm32cubemx)

@@ -1,8 +1,7 @@
-#include "gm6020.h"
-
 #include <math.h>
-#include <stddef.h>
 #include <string.h>
+
+#include "GM6020.h"
 
 GM6020_t motor[3];
 
@@ -59,13 +58,29 @@ void GM6020_SetMode(GM6020_t *gm6020, GM6020_ControlMode_t mode)
 
     if ((gm6020 == NULL)
         || (mode < GM6020_MODE_PROTECT)
-        || (mode > GM6020_MODE_POSITION)) {
+        || (mode > GM6020_MODE_CURRENT)) {
         return;
     }
 
     primask = __get_PRIMASK();
     __disable_irq();
     gm6020->command_mode = mode;
+    __DMB();
+    if (primask == 0U) {
+        __enable_irq();
+    }
+}
+
+void GM6020_SetTargetCurrent(GM6020_t *gm6020, int16_t current_raw)
+{
+    if (gm6020 == NULL) {
+        return;
+    }
+    current_raw = (int16_t)GM6020_Clamp((float)current_raw,
+                                      GM6020_CONTROL_OUTPUT_LIMIT);
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    gm6020->command_current_raw = current_raw;
     __DMB();
     if (primask == 0U) {
         __enable_irq();
@@ -120,10 +135,19 @@ void GM6020_ParseFeedback(GM6020_t *gm6020,
     if ((gm6020 == NULL) || (msg == NULL)) {
         return;
     }
-    if ((msg->dlc != 8U)
-    || (msg->id != GM6020_FEEDBACK_STD_ID)) {
+    uint32_t expected_id;
+
+    if ((gm6020->motor_id < GM6020_MIN_MOTOR_ID)
+        || (gm6020->motor_id > GM6020_MAX_MOTOR_ID)) {
         return;
-    }
+        }
+
+    expected_id = GM6020_FEEDBACK_BASE_ID + gm6020->motor_id;
+
+    if ((msg->dlc != 8U)
+        || (msg->id != expected_id)) {
+        return;
+        }
     encoder = (uint16_t)(((uint16_t)msg->data[0] << 8U) | msg->data[1]);
     speed_rpm = (int16_t)(((uint16_t)msg->data[2] << 8U) | msg->data[3]);
     feedback_current = (int16_t)(((uint16_t)msg->data[4] << 8U) | msg->data[5]);
@@ -165,6 +189,7 @@ int16_t GM6020_CalculateControl(GM6020_t *gm6020, uint32_t now_ms)
     GM6020_ControlMode_t command_mode;
     float command_angle_deg;
     float command_speed_rpm;
+    int16_t command_current_raw;
     float relative_angle;
     float speed_rpm;
     float control_output;
@@ -183,6 +208,7 @@ int16_t GM6020_CalculateControl(GM6020_t *gm6020, uint32_t now_ms)
     command_mode = gm6020->command_mode;
     command_angle_deg = gm6020->command_angle_deg;
     command_speed_rpm = gm6020->command_speed_rpm;
+    command_current_raw = gm6020->command_current_raw;
     if (primask == 0U) {
         __enable_irq();
     }
@@ -209,6 +235,14 @@ int16_t GM6020_CalculateControl(GM6020_t *gm6020, uint32_t now_ms)
         gm6020->target_speed_rpm = 0.0f;
         gm6020->control_output = 0.0f;
         return 0;
+    }
+
+    if (command_mode == GM6020_MODE_CURRENT) {
+        gm6020->target_angle_deg = relative_angle;
+        gm6020->target_speed_rpm = 0.0f;
+        gm6020->control_output = GM6020_Clamp((float)command_current_raw,
+                                             GM6020_CONTROL_OUTPUT_LIMIT);
+        return (int16_t)gm6020->control_output;
     }
 
     if (command_mode == GM6020_MODE_SPEED) {
@@ -259,6 +293,7 @@ void GM6020_GetTelemetry(const GM6020_t *gm6020,
     telemetry->target_speed_rpm = gm6020->target_speed_rpm;
     telemetry->speed_rpm = (float)gm6020->speed_rpm;
     telemetry->control_output = gm6020->control_output;
+    telemetry->feedback_current_raw = gm6020->feedback_current;
     if (primask == 0U) {
         __enable_irq();
     }
@@ -269,43 +304,46 @@ void GM6020_GetTelemetry(const GM6020_t *gm6020,
              <= GM6020_FEEDBACK_TIMEOUT_MS)) ? 1U : 0U;
 }
 
-HAL_StatusTypeDef GM6020_SendMotor2Control(
+HAL_StatusTypeDef GM6020_SendControl(
     CANIO_Bus_t *bus,
+    uint8_t motor_id,
     int16_t control_output)
 {
     uint8_t data[8] = {0};
+    uint32_t control_id;
+    uint8_t slot;
+    uint8_t offset;
     uint16_t raw_output;
 
-    if (bus == NULL)
-    {
+    if ((bus == NULL)
+        || (motor_id < GM6020_MIN_MOTOR_ID)
+        || (motor_id > GM6020_MAX_MOTOR_ID)) {
         return HAL_ERROR;
+        }
+
+    if (motor_id <= 4U) {
+        control_id = GM6020_CONTROL_GROUP_1_ID;
+        slot = motor_id - 1U;
+    } else {
+        control_id = GM6020_CONTROL_GROUP_2_ID;
+        slot = motor_id - 5U;
     }
 
-    if (control_output > (int16_t)GM6020_CONTROL_OUTPUT_LIMIT)
-    {
-        control_output = (int16_t)GM6020_CONTROL_OUTPUT_LIMIT;
+    offset = (uint8_t)(slot * 2U);
+    /* Bound direct callers as well as PID/current-mode outputs. */
+    control_output = (int16_t)GM6020_Clamp((float)control_output,
+                                         GM6020_CONTROL_OUTPUT_LIMIT);
+    if (control_output > GM6020_CURRENT_PROTOCOL_LIMIT) {
+        control_output = GM6020_CURRENT_PROTOCOL_LIMIT;
+    } else if (control_output < -GM6020_CURRENT_PROTOCOL_LIMIT) {
+        control_output = -GM6020_CURRENT_PROTOCOL_LIMIT;
     }
-    else if (control_output < (int16_t)-GM6020_CONTROL_OUTPUT_LIMIT)
-    {
-        control_output = (int16_t)-GM6020_CONTROL_OUTPUT_LIMIT;
-    }
-
     raw_output = (uint16_t)control_output;
 
-    /*
-     * 这里保留你原来的 Motor2 数据位置：
-     * data[2], data[3]
-     */
-    data[0] = (uint8_t)(raw_output >> 8U);
-    data[1] = (uint8_t)(raw_output & 0xFFU);
+    data[offset] = (uint8_t)(raw_output >> 8U);
+    data[offset + 1U] = (uint8_t)raw_output;
 
-    if (CANIO_Send(
-            bus,
-            GM6020_CONTROL_STD_ID,
-            data))
-    {
-        return HAL_OK;
-    }
-
-    return HAL_ERROR;
+    return CANIO_Send(bus, control_id, data)
+        ? HAL_OK
+        : HAL_ERROR;
 }

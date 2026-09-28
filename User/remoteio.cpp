@@ -8,6 +8,9 @@
 uint8_t sbus_rx_buf[2][SBUS_RX_BUF_NUM];
 RC_ctrl_t rc_ctrl;
 
+/* 真正分配调试对象的存储空间，初始值全部为0 */
+volatile RemoteIO_Debug_t remote_debug = {};
+
 /**
  * @brief 内部函数声明
  */
@@ -20,7 +23,9 @@ void RC_DataHandle(RC_ctrl_t *rc_ctrl);
  * @param uint8_t *rx1_buf , uint8_t *rx2_buf , uint16_t dma_buf_num DMA缓冲区子字节数 由宏定义给出
  */
 void REMOTEIO_Init(uint8_t *rx1_buf, uint8_t *rx2_buf, uint16_t dma_buf_num)
-{
+{    /* 第一帧还没收到，不能默认认为遥控器已经在线 */
+    rc_ctrl.rc_live_cnt_WFLY = 0U;
+    rc_ctrl.sbus_status.rc_offline = 1U;
     //enable the DMA transfer for the receiver request
     //使能DMA串口接收
     SET_BIT(huart3.Instance->CR3, USART_CR3_DMAR);
@@ -66,6 +71,7 @@ void REMOTEIO_Init(uint8_t *rx1_buf, uint8_t *rx2_buf, uint16_t dma_buf_num)
  */
 void RemoteIO_IRQHandler(void)
 {
+    remote_debug.irq_count++;
     //usart_printf("ok\r\n");
     if(huart3.Instance->SR & UART_FLAG_RXNE)//接收到数据
     {
@@ -73,6 +79,8 @@ void RemoteIO_IRQHandler(void)
     }
     else if(USART3->SR & UART_FLAG_IDLE)
     {
+        remote_debug.idle_count++;
+
         static uint16_t this_time_rx_len = 0;
 
         __HAL_UART_CLEAR_PEFLAG(&huart3);
@@ -88,6 +96,17 @@ void RemoteIO_IRQHandler(void)
             //get receive data length, length = set_data_length - remain_length
             //获取接收数据长度,长度 = 设定长度 - 剩余长度
             this_time_rx_len = SBUS_RX_BUF_NUM - hdma_usart3_rx.Instance->NDTR;
+            remote_debug.last_rx_len = this_time_rx_len;
+
+            remote_debug.last_head =
+                (this_time_rx_len > 0U)
+                ? sbus_rx_buf[0][0]
+                : 0U;
+
+            remote_debug.last_tail =
+                (this_time_rx_len == RC_FRAME_LENGTH_WFLY)
+                ? sbus_rx_buf[0][24]
+                : 0U;
 
             //reset set_data_lenght
             //重新设定数据长度
@@ -118,6 +137,17 @@ void RemoteIO_IRQHandler(void)
             //get receive data length, length = set_data_length - remain_length
             //获取接收数据长度,长度 = 设定长度 - 剩余长度
             this_time_rx_len = SBUS_RX_BUF_NUM - hdma_usart3_rx.Instance->NDTR;
+            remote_debug.last_rx_len = this_time_rx_len;
+
+            remote_debug.last_head =
+                (this_time_rx_len > 0U)
+                ? sbus_rx_buf[1][0]
+                : 0U;
+
+            remote_debug.last_tail =
+                (this_time_rx_len == RC_FRAME_LENGTH_WFLY)
+                ? sbus_rx_buf[1][24]
+                : 0U;
 
             //reset set_data_lenght
             //重新设定数据长度q
@@ -151,6 +181,12 @@ static void sbus_to_rc(volatile const uint8_t *sbus_buf, RC_ctrl_t *rc_ctrl)
 {
     if (sbus_buf == nullptr || rc_ctrl == NULL)
     {
+        return;
+    }
+    /* 当前模块的帧结构定义：第0字节应该是0x0F */
+    if (sbus_buf[0] != 0x0FU)
+    {
+        remote_debug.bad_header_count++;
         return;
     }
     // usart_printf("WFLY\r\n");
@@ -220,6 +256,9 @@ static void sbus_to_rc(volatile const uint8_t *sbus_buf, RC_ctrl_t *rc_ctrl)
     rc_ctrl->sbus_status.rc_offline = 0;
 
     RC_DataHandle(rc_ctrl);
+
+    /* 通道解析和死区处理都执行完后，再累计 */
+    remote_debug.decoded_count++;
 
     //打印遥控器原始数据
 
